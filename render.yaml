@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: pr-autogen-agent
+    env: docker
+    plan: free
+    envVars:
+      - key: GITHUB_APP_ID
+        sync: false
+      - key: GITHUB_PRIVATE_KEY
+        sync: false
+      - key: GITHUB_WEBHOOK_SECRET
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false

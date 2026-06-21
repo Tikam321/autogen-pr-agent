@@ -1,147 +1,69 @@
 # pr-autogen-agent
 
-An AutoGen-powered multi-agent system that takes an issue description, explores a codebase, fixes the code, creates a GitHub PR, and handles review feedback.
+A GitHub App that auto-fixes issues by creating PRs using a multi-agent AutoGen workflow.
 
-## Architecture
+## Architecture (current)
 
 ```
-User Input (issue description)
+Issue (CLI or GitHub issue webhook)
         │
         ▼
-┌──────────────── GraphFlow ──────────────────────┐
-│                                                  │
-│  ┌──────────┐   ┌──────────┐   ┌──────────┐     │
-│  │ Explorer │──►│ Planner  │──►│  Fixer   │     │
-│  └──────────┘   └──────────┘   └────┬─────┘     │
-│                                      │           │
-│  ┌──────────┐               ┌───────▼──────┐    │
-│  │ PR       │◀──────────────│  Reviewer    │    │
-│  │ Creator  │               │  Agent       │    │
-│  └──────────┘               └──────────────┘    │
-│                                     │            │
-│                            needs fix │ approved  │
-│                                     ▼            │
-│                            ┌─────────────────┐  │
-│                            │  PR Created     │  │
-│                            │  (awaits review)│  │
-│                            └─────────────────┘  │
-└──────────────────────────────────────────────────┘
+┌──────────────────────────────┐
+│       3-Agent Linear Flow    │
+│                              │
+│  ┌──────────┐   ┌──────────┐ │
+│  │ Explorer │──►│ Planner  │─│──► messages
+│  └──────────┘   └──────────┘ │
+│                     │        │
+│                     ▼        │
+│              ┌──────────┐    │
+│              │ Executor │    │
+│              └────┬─────┘    │
+│                   │          │
+│            fix_and_create_pr │
+└───────────────────┼──────────┘
+                    ▼
+        ┌─────────────────────┐
+        │  PR created on      │
+        │  target repo        │
+        └─────────────────────┘
 ```
-
-Each agent receives the **full conversation history** from all previous agents. The `GraphFlow` runtime routes messages between agents based on conditional edges.
 
 ## Agents
 
 | Agent | Tools | Purpose |
 |---|---|---|
-| **Explorer** | `list_directory`, `read_file`, `grep_search` | Scans the codebase to find files relevant to the issue |
-| **Planner** | _(none — pure LLM)_ | Creates a step-by-step fix plan from exploration findings |
-| **Fixer** | `read_file`, `write_file`, `edit_file` | Applies the planned changes to the codebase |
-| **Reviewer** | `read_file` | Reads changed files and approves or requests fixes |
-| **PR Creator** | `run_git`, `create_pr`, `setup_git_auth` | Creates a git branch, commits, pushes, and opens a GitHub PR |
+| **Explorer** | `list_directory`, `read_file`, `grep_search` | Scans the codebase for files relevant to the issue |
+| **Planner** | _(none — pure LLM)_ | Creates a step-by-step fix plan from exploration |
+| **Executor** | `fix_and_create_pr` | Reads file, applies fix, commits, force-pushes, creates PR (single tool) |
 
-## Workflow Graph
+## Flow
 
-```python
-# Defined in workflow.py
-nodes = {
-    "explorer": DiGraphNode(edges=["planner"]),
-    "planner": DiGraphNode(edges=["fixer"]),
-    "fixer": DiGraphNode(edges=["reviewer"]),
-    "reviewer": DiGraphNode(
-        edges=[
-            DiGraphEdge(target="pr_creator", condition="APPROVED"),
-            DiGraphEdge(target="fixer", condition=needs_fix, activation_group="backward"),
-        ],
-    ),
-    "pr_creator": DiGraphNode(edges=[]),
-}
-```
+1. **Explorer** reads the codebase, finds relevant files
+2. **Planner** creates a fix plan from explorer's findings
+3. **Executor** calls `fix_and_create_pr(search_text, replace_with, commit_message)` — a single end-to-end tool that reads the file, does a smart line-based replace (with multiline fallback), commits, force-pushes to `fix-issue-<timestamp>`, auto-closes any existing PR from that branch, and creates a new PR
 
-**Routing logic:**
-- Forward: `explorer → planner → fixer → reviewer`
-- If reviewer's response contains `"APPROVED"` → `pr_creator`
-- If reviewer's response does NOT contain `"APPROVED"` → `fixer` (loop with `activation_group="backward"`)
-
-**Termination:** `TextMentionTermination("PR_CREATED") | MaxMessageTermination(20)`
-
-## How Agents Communicate
-
-1. When an agent finishes, its final text response is published to the message bus
-2. `GraphFlow` evaluates edge conditions on that message to determine the next agent
-3. The next agent receives the **entire conversation history** (all previous agents' messages)
-4. Each agent can make **multiple consecutive tool calls** within its turn
-5. Tool results are fed back to the LLM, which decides whether to continue calling tools or respond
-
-### Agent Internal Loop (per agent turn)
+## Deployment
 
 ```
-LLM receives full history + system prompt + tools
+GitHub Issue (opened)
+        │
+        ▼  webhook POST
+┌───────────────────┐
+│  FastAPI Server   │
+│  (Render.com)     │
+│                   │
+│  verify signature │
+│  get inst. token  │
+│  clone repo       │
+│  run 3 agents     │
+│  create PR        │
+│  cleanup temp dir │
+└───────────────────┘
         │
         ▼
-LLM returns FunctionCalls (e.g. read_file, edit_file)
-        │
-        ▼
-AutoGen executes each FunctionTool locally
-        │
-        ▼
-FunctionExecutionResults are sent back to LLM
-        │
-        ▼
-LLM returns text response (or more tool calls)
-        │
-        ▼
-Text response is published → GraphFlow routes to next agent
+   PR created on repo
 ```
-
-## Message Flow
-
-```
-┌──────────┐    text     ┌──────────┐    text     ┌──────────┐
-│ Explorer │──────────►│ Planner │──────────►│  Fixer  │
-└──────────┘           └──────────┘           └────┬─────┘
-                                                   │
-                                              text │
-                                                   ▼
-                                            ┌──────────┐
-                                            │ Reviewer │
-                                            └────┬─────┘
-                                                 │
-                                   ┌─────────────┴─────────────┐
-                                   │ text                      │ text
-                                   │ "APPROVED"                │ no "APPROVED"
-                                   ▼                           ▼
-                            ┌──────────┐              ┌──────────┐
-                            │PR Creator│              │  Fixer   │
-                            └──────────┘              └──────────┘
-                                   │
-                                   ▼
-                            "PR_CREATED"
-                            → workflow terminates
-```
-
-## Tech Stack
-
-| Component | Technology |
-|---|---|
-| **Agent Framework** | AutoGen 0.7.x (`autogen-agentchat`) |
-| **LLM Provider** | OpenRouter / Groq (OpenAI-compatible API) |
-| **Model Client** | Custom `RawGroqClient` (bypasses AutoGen's tool processing issues) |
-| **Code Execution** | `LocalCommandLineCodeExecutor` |
-| **Orchestration** | `GraphFlow` with `DiGraph` (directed graph) |
-| **Git Integration** | `subprocess` via `FunctionTool` wrappers |
-| **Secrets** | `.env` file (`OPEN_ROUTER_API_KEY`, `GROQ_API_KEY`, `GITHUB_TOKEN`) |
-| **Python** | 3.14 |
-| **Package Manager** | `uv` |
-
-## Why `RawGroqClient`?
-
-AutoGen's built-in `OpenAIChatCompletionClient` sends `strict: false` and `additionalProperties: false` in tool schemas. This triggers Groq's Llama model to switch to a malformed XML tool call format (`<function=name{...}` without closing `>`). The `RawGroqClient` in `config.py` bypasses this by:
-
-1. Using the raw `AsyncOpenAI` client directly (same API format)
-2. Stripping problematic fields from tool schemas (`strict`, `additionalProperties`)
-3. Post-processing XML-style `<function=name>args</function>` responses from the model
-4. Properly handling `tool_choice` for reflection and non-reflection modes
 
 ## Project Structure
 
@@ -149,70 +71,76 @@ AutoGen's built-in `OpenAIChatCompletionClient` sends `strict: false` and `addit
 pr-autogen-agent/
 ├── agents/
 │   ├── __init__.py
-│   ├── explorer.py          # Scans codebase for relevant files
-│   ├── planner.py           # Creates fix plan (no tools)
-│   ├── fixer.py             # Applies code changes
-│   ├── reviewer.py          # Reviews changes, approves or requests fixes
-│   └── pr_creator.py        # Creates git branch + GitHub PR
+│   ├── explorer.py       # Scans codebase for relevant files
+│   ├── planner.py        # Creates fix plan (no tools)
+│   └── executor.py       # fix_and_create_pr tool
 ├── tools/
 │   ├── __init__.py
-│   ├── file_tools.py        # read_file, write_file, edit_file, grep_search, list_directory
-│   └── git_tools.py         # run_git, create_pr, setup_git_auth, get_pr_comments
+│   ├── file_tools.py     # read_file, write_file, edit_file, grep_search, list_directory
+│   └── git_tools.py      # fix_and_create_pr, create_full_pr, setup_git_auth
 ├── server/
 │   ├── __init__.py
-│   └── webhook.py           # FastAPI webhook (for feedback loop)
-├── docs/
-│   ├── architecture.md      # Detailed architecture documentation
-│   ├── agent-communication.md  # Agent communication & message flow
-│   └── implementation-plan.md  # Implementation plan & phases
-├── config.py                # RawGroqClient model client + message converters
-├── workflow.py              # GraphFlow definition with DiGraph
-├── test_flow.py             # E2E test with retry logic
-├── main.py                  # Entry point
-├── pyproject.toml           # Project metadata & dependencies
-├── .env.example             # Environment variable template
+│   ├── app.py            # FastAPI entry point
+│   ├── auth.py           # JWT → installation token
+│   ├── webhook.py        # Signature verification + issue handler
+│   ├── repo_manager.py   # Clone (depth 1) + cleanup
+│   └── runner.py         # chdir + agent workflow
+├── docs/                 # Architecture docs
+├── config.py             # Model client factory
+├── workflow.py           # 3-node linear team flow
+├── test_flow.py          # E2E test with retry
+├── main.py               # CLI entry point
+├── Dockerfile            # python:3.14-slim + uv
+├── render.yaml           # Render blueprint
+├── pyproject.toml
+├── .env.example
 └── .gitignore
 ```
 
 ## Setup
 
 ```bash
-# Clone and install
 git clone <repo-url>
 cd pr-autogen-agent
 uv sync
-
-# Configure environment
 cp .env.example .env
-# Edit .env with your API keys:
-#   OPEN_ROUTER_API_KEY=sk-or-v1-...
-#   GITHUB_TOKEN=ghp_...
+# Edit .env: GROQ_API_KEY, GITHUB_TOKEN, GITHUB_APP_ID, GITHUB_PRIVATE_KEY, GITHUB_WEBHOOK_SECRET
 ```
 
 ## Usage
 
 ```bash
-# Run the test flow against the test repo
-uv run python test_flow.py
+# CLI: pass issue as argument
+uv run python main.py "The add function returns wrong results, fix it"
 
-# Run with a custom issue (once main.py is implemented)
-uv run python main.py "The add function returns wrong results..."
+# CLI: pipe issue from file
+uv run python main.py < issue.txt
+
+# Server
+uv run python -m uvicorn server.app:app --port 8000
 ```
 
-## E2E Test
+## Tech Stack
 
-`test_flow.py` runs the full agent pipeline against a test repository at `/private/var/folders/jd/bm1_qs2d6qng6brmj0b44s8c0000gn/T/opencode/test-repo`.
-
-Features:
-- Resets the test repo to a known state before each run
-- Retries up to 3 times on transient errors (rate limits, etc.)
-- Prints each agent's tool calls and responses
+| Component | Technology |
+|---|---|
+| **Agent Framework** | AutoGen 0.7.x (`autogen-agentchat`) |
+| **LLM Provider** | Groq (`llama-3.3-70b-versatile`) |
+| **Model Client** | `OpenAIChatCompletionClient` |
+| **Orchestration** | 3-agent linear `SequentialFlow` |
+| **Git Integration** | `FunctionTool` wrappers via subprocess |
+| **Server** | FastAPI + uvicorn |
+| **Deployment** | Docker → Render (free tier) |
+| **Auth** | GitHub App JWT + installation tokens |
+| **Secrets** | `.env` (ignored by git) |
+| **Python** | 3.14 |
+| **Package Manager** | `uv` |
 
 ## Phases
 
 | Phase | Status | Description |
 |---|---|---|
-| **1. MVP** | ✅ Complete | Explorer → Planner → Fixer → Reviewer → PR Creator (manual text input) |
-| **2. Feedback Loop** | ⏳ Pending | Webhook server + Feedback Handler agent for PR review iterations |
-| **3. Jira Integration** | ⏳ Pending | FunctionTool wrappers for Jira REST API |
-| **4. Production** | ⏳ Pending | Auth, monitoring, error recovery, persistent state |
+| **1. Core flow** | ✅ Done | 3-agent linear workflow, `fix_and_create_pr` tool, CLI entry point |
+| **2. Server** | ✅ Done | FastAPI app, auth, webhook, clone/cleanup, runner |
+| **3. Deploy** | ⏳ Ready | Dockerfile + render.yaml done, needs GitHub App creation + deploy |
+| **4. Production** | ⏳ Pending | Error commenting on issues, BYOK, monitoring |
