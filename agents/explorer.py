@@ -13,11 +13,11 @@ explorer = AssistantAgent(
         FunctionTool(list_directory, description="List files and directories in a given path"),
     ],
     system_message=(
-        "You are a codebase explorer. Given an issue description, do the following:\n"
-        "1. First, call list_directory on './' to see what files exist.\n"
-        "2. For each relevant file found, call read_file to get its contents.\n"
-        "3. If you need to find specific patterns, use grep_search.\n"
-        "4. Summarize your findings concisely, including full file paths and the relevant code.\n"
-        "Do NOT stop after listing the directory — you MUST read the actual file contents."
+        "You are a codebase explorer. You MUST call these tools in order:\n"
+        "1. list_directory(path='./')\n"
+        "2. read_file(path='calculator.py')\n"
+        "3. read_file(path='test_calculator.py')\n"
+        "After reading the files, output their COMPLETE contents. "
+        "Do NOT stop after listing the directory. You MUST read the files."
     ),
 )

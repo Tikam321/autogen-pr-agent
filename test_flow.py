@@ -24,10 +24,11 @@ def reset_repo():
         ["git", "reset", "--hard", "origin/master"],
         capture_output=True, cwd=TEST_REPO,
     )
-    subprocess.run(
-        ["git", "branch", "-D", "fix/add-function-bug"],
-        capture_output=True, cwd=TEST_REPO,
-    )
+    for branch in ["fix/add-function-bug", "fix-add-function-bug"]:
+        subprocess.run(
+            ["git", "branch", "-D", branch],
+            capture_output=True, cwd=TEST_REPO,
+        )
 
 
 async def run_workflow(issue: str) -> int:
@@ -37,9 +38,7 @@ async def run_workflow(issue: str) -> int:
         "user": "USER INPUT",
         "explorer": "STEP 1: EXPLORER",
         "planner": "STEP 2: PLANNER",
-        "fixer": "STEP 3: FIXER",
-        "reviewer": "STEP 4: REVIEWER",
-        "pr_creator": "STEP 5: PR CREATOR",
+        "executor": "STEP 3: EXECUTOR",
     }
 
     seen_stages = set()
@@ -116,8 +115,8 @@ async def main():
             print(f"\n{'='*70}")
             print(f"  RETRY ATTEMPT {attempt}/{max_retries}")
             print(f"{'='*70}")
-            reset_repo()
-            os.chdir(TEST_REPO)
+        reset_repo()
+        os.chdir(TEST_REPO)
 
         try:
             msg_count = await run_workflow(issue)

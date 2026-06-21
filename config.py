@@ -26,7 +26,6 @@ from autogen_agentchat.agents._assistant_agent import FunctionCall
 
 load_dotenv()
 
-
 def _to_openai_messages(messages: Sequence[LLMMessage]) -> list[dict]:
     result: list[dict] = []
     for m in messages:
@@ -279,10 +278,42 @@ class RawGroqClient(ChatCompletionClient):
     def model_info(self) -> ModelInfo:
         return self._mi
 
+groq = RawGroqClient(
+    model="llama-3.3-70b-versatile",
+    base_url="https://api.groq.com/openai/v1",
+    api_key=os.getenv("GROQ_API_KEY"),
+)
 
-def get_model_client() -> ChatCompletionClient:
-    return RawGroqClient(
+openRouter = RawGroqClient(
         model="google/gemma-4-31b-it:free",
         api_key=os.getenv("OPEN_ROUTER_API_KEY"),
         base_url="https://openrouter.ai/api/v1",
-    )
+)
+
+nvidia = RawGroqClient(
+    model="deepseek-ai/deepseek-v4-flash",
+    base_url="https://integrate.api.nvidia.com/v1",
+    api_key=os.environ.get("NVIDIA_API_KEY"),
+)
+
+deepseek = RawGroqClient(
+    model="deepseek-v4-flash",
+    base_url="https://api.deepseek.com",
+    api_key=os.environ.get("DEEPSEEK_API_KEY"),
+)
+
+mistral_client = RawGroqClient(
+    model="mistral-medium",  # or "mistral-large", "mistral-small", etc.
+    api_key=os.getenv("MISTRAL_API_KEY"),
+    base_url="https://api.mistral.ai/v1/",
+)
+
+llm = RawGroqClient(
+    model="gemini-3.1-pro-preview",
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+    api_key=os.environ.get("GOOGLE_API_KEY")
+)
+
+
+def get_model_client() -> ChatCompletionClient:
+    return mistral_client
