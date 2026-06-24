@@ -23,8 +23,13 @@ def _get_headers():
 
 
 def setup_git_auth(repo_dir: str = ".") -> str:
-    """Inject the token into the origin remote URL so git push works."""
+    """Configure git identity and inject token into origin remote URL."""
     import subprocess
+    subprocess.run(["git", "config", "user.name", "pr-autogen-agent[bot]"], cwd=repo_dir)
+    subprocess.run(
+        ["git", "config", "user.email", "4108243+pr-autogen-agent[bot]@users.noreply.github.com"],
+        cwd=repo_dir,
+    )
     origin = subprocess.run(
         ["git", "remote", "get-url", "origin"],
         capture_output=True, text=True, cwd=repo_dir,
