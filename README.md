@@ -1,133 +1,92 @@
-# pr-autogen-agent
+# PR Autogen Agent
 
-A GitHub App that auto-fixes issues by creating PRs using a multi-agent AutoGen workflow.
+A GitHub App that auto-fixes issues by creating PRs using a multi-agent AutoGen workflow, deployed on Render.
 
-## Architecture (current)
-
-```
-Issue (CLI or GitHub issue webhook)
-        │
-        ▼
-┌──────────────────────────────┐
-│       3-Agent Linear Flow    │
-│                              │
-│  ┌──────────┐   ┌──────────┐ │
-│  │ Explorer │──►│ Planner  │─│──► messages
-│  └──────────┘   └──────────┘ │
-│                     │        │
-│                     ▼        │
-│              ┌──────────┐    │
-│              │ Executor │    │
-│              └────┬─────┘    │
-│                   │          │
-│            fix_and_create_pr │
-└───────────────────┼──────────┘
-                    ▼
-        ┌─────────────────────┐
-        │  PR created on      │
-        │  target repo        │
-        └─────────────────────┘
-```
-
-## Agents
-
-| Agent | Tools | Purpose |
-|---|---|---|
-| **Explorer** | `list_directory`, `read_file`, `grep_search` | Scans the codebase for files relevant to the issue |
-| **Planner** | _(none — pure LLM)_ | Creates a step-by-step fix plan from exploration |
-| **Executor** | `fix_and_create_pr` | Reads file, applies fix, commits, force-pushes, creates PR (single tool) |
-
-## Flow
-
-1. **Explorer** reads the codebase, finds relevant files
-2. **Planner** creates a fix plan from explorer's findings
-3. **Executor** calls `fix_and_create_pr(search_text, replace_with, commit_message)` — a single end-to-end tool that reads the file, does a smart line-based replace (with multiline fallback), commits, force-pushes to `fix-issue-<timestamp>`, auto-closes any existing PR from that branch, and creates a new PR
-
-## Deployment
+## Architecture
 
 ```
 GitHub Issue (opened)
         │
         ▼  webhook POST
-┌───────────────────┐
-│  FastAPI Server   │
-│  (Render.com)     │
-│                   │
-│  verify signature │
-│  get inst. token  │
-│  clone repo       │
-│  run 3 agents     │
-│  create PR        │
-│  cleanup temp dir │
-└───────────────────┘
-        │
-        ▼
-   PR created on repo
+┌─────────────────────────────────┐
+│       FastAPI Server (Render)   │
+│                                 │
+│  1. Verify HMAC signature       │
+│  2. Exchange JWT → install token│
+│  3. Clone repo (──depth 1)      │
+│  4. Run 3-agent graph           │
+│  5. Create PR, comment on issue │
+│  6. Cleanup temp dir            │
+└─────────────┬───────────────────┘
+              │
+              ▼
+     ┌───────────────────────┐
+     │    3-Agent Pipeline   │
+     │  GraphFlow (DAG)      │
+     │                       │
+     │  ┌──────────┐         │
+     │  │ Explorer │─►files  │
+     │  └──────────┘         │
+     │  ┌──────────┐         │
+     │  │ Planner  │─►plan   │
+     │  └──────────┘         │
+     │  ┌──────────┐         │
+     │  │ Executor │─►PR     │
+     │  └──────────┘         │
+     └───────────────────────┘
+              │
+              ▼
+        PR created on
+        target repo
 ```
+
+## Agents
+
+| Agent | Tools | Role |
+|---|---|---|
+| **Explorer** | `list_directory`, `read_file`, `grep_search` | Scans the codebase for files relevant to the issue |
+| **Planner** | _(none — pure LLM)_ | Creates a step-by-step fix plan from exploration results |
+| **Executor** | `fix_and_create_pr` | Reads file, applies line-based replace, commits, force-pushes, creates PR with auto-close of old PRs from same branch |
 
 ## Project Structure
 
 ```
 pr-autogen-agent/
 ├── agents/
-│   ├── __init__.py
 │   ├── explorer.py       # Scans codebase for relevant files
 │   ├── planner.py        # Creates fix plan (no tools)
 │   └── executor.py       # fix_and_create_pr tool
 ├── tools/
-│   ├── __init__.py
-│   ├── file_tools.py     # read_file, write_file, edit_file, grep_search, list_directory
-│   └── git_tools.py      # fix_and_create_pr, create_full_pr, setup_git_auth
+│   ├── file_tools.py     # read_file, write_file, grep_search, list_directory
+│   └── git_tools.py      # fix_and_create_pr, create_full_pr, create_pr, setup_git_auth
 ├── server/
-│   ├── __init__.py
-│   ├── app.py            # FastAPI entry point
-│   ├── auth.py           # JWT → installation token
-│   ├── webhook.py        # Signature verification + issue handler
-│   ├── repo_manager.py   # Clone (depth 1) + cleanup
-│   └── runner.py         # chdir + agent workflow
-├── docs/                 # Architecture docs
-├── config.py             # Model client factory
-├── workflow.py           # 3-node linear team flow
-├── test_flow.py          # E2E test with retry
-├── main.py               # CLI entry point
-├── Dockerfile            # python:3.14-slim + uv
-├── render.yaml           # Render blueprint
-├── pyproject.toml
-├── .env.example
+│   ├── app.py            # FastAPI entry point + health endpoint
+│   ├── auth.py           # JWT → installation token exchange
+│   ├── webhook.py        # HMAC signature verification + issue handler
+│   ├── repo_manager.py   # Clone (──depth 1, token auth) + cleanup + comment_on_issue
+│   └── runner.py         # chdir into cloned repo + run agent workflow
+├── docs/
+│   ├── internal-architecture.md   # Full architecture deep-dive
+│   ├── status-report.md           # Current project status
+│   └── deployment-action-plan.md  # Render deployment guide
+├── config.py             # get_model_client() → Mistral AI client
+├── workflow.py           # 3-node DiGraph team definition
+├── main.py               # CLI entry point for local testing
+├── Dockerfile            # python:3.14-slim + git + uv
+├── render.yaml           # Render blueprint (free tier)
+├── pyproject.toml        # uv-managed dependencies
+├── .env.example          # Required env vars template
 └── .gitignore
-```
-
-## Setup
-
-```bash
-git clone <repo-url>
-cd pr-autogen-agent
-uv sync
-cp .env.example .env
-# Edit .env: GROQ_API_KEY, GITHUB_TOKEN, GITHUB_APP_ID, GITHUB_PRIVATE_KEY, GITHUB_WEBHOOK_SECRET
-```
-
-## Usage
-
-```bash
-# CLI: pass issue as argument
-uv run python main.py "The add function returns wrong results, fix it"
-
-# CLI: pipe issue from file
-uv run python main.py < issue.txt
-
-# Server
-uv run python -m uvicorn server.app:app --port 8000
 ```
 
 ## Tech Stack
 
 | Component | Technology |
 |---|---|
-| **Agent Framework** | AutoGen 0.7.x (`autogen-agentchat`) |
-| **LLM Provider** | Groq (`llama-3.3-70b-versatile`) |
+| **Agent Framework** | AutoGen AgentChat 0.7.x (`autogen-agentchat`) |
+| **LLM Provider** | Mistral AI (`mistral-medium`) |
 | **Model Client** | `OpenAIChatCompletionClient` |
-| **Orchestration** | 3-agent linear `SequentialFlow` |
+| **Orchestration** | `GraphFlow` + `DiGraph` — linear DAG (explorer → planner → executor) |
 | **Git Integration** | `FunctionTool` wrappers via subprocess |
 | **Server** | FastAPI + uvicorn |
 | **Deployment** | Docker → Render (free tier) |
@@ -136,11 +95,58 @@ uv run python -m uvicorn server.app:app --port 8000
 | **Python** | 3.14 |
 | **Package Manager** | `uv` |
 
-## Phases
+## Setup
 
-| Phase | Status | Description |
+```bash
+git clone https://github.com/Tikam321/autogen-pr-agent
+cd pr-autogen-agent
+uv sync
+cp .env.example .env
+# Edit .env with your secrets (see below)
+```
+
+### Required Environment Variables
+
+| Variable | Description |
+|---|---|
+| `MISTRAL_API_KEY` | Mistral AI API key for LLM calls |
+| `GITHUB_TOKEN` | GitHub personal access token (local CLI testing) |
+| `GITHUB_APP_ID` | GitHub App ID (4108243) |
+| `GITHUB_PRIVATE_KEY` | GitHub App private key (single line, `\n` for newlines) |
+| `GITHUB_WEBHOOK_SECRET` | Webhook HMAC secret |
+
+> **Note:** `GITHUB_PRIVATE_KEY` must be a single line with `\n` to represent newlines. Dotenv cannot parse multi-line values.
+
+## Usage
+
+```bash
+# CLI: pass issue as argument
+uv run python main.py "The add function in calculator.py returns a - b instead of a + b"
+
+# CLI: pipe issue from file
+uv run python main.py < issue.txt
+
+# Local server
+uv run python -m uvicorn server.app:app --port 8000
+
+# With ngrok (for GitHub webhook testing)
+ngrok http 8000
+```
+
+## Status
+
+| Area | Status | Details |
 |---|---|---|
-| **1. Core flow** | ✅ Done | 3-agent linear workflow, `fix_and_create_pr` tool, CLI entry point |
-| **2. Server** | ✅ Done | FastAPI app, auth, webhook, clone/cleanup, runner |
-| **3. Deploy** | ⏳ Ready | Dockerfile + render.yaml done, needs GitHub App creation + deploy |
-| **4. Production** | ⏳ Pending | Error commenting on issues, BYOK, monitoring |
+| **Core Agent Flow** | ✅ Done | 3-agent graph, fix_and_create_pr tool, CLI entry |
+| **Server** | ✅ Done | FastAPI, auth, webhook, clone/cleanup, runner |
+| **Deploy** | ✅ Live | `https://pr-autogen-agent.onrender.com` |
+| **Error Comments** | ✅ Done | Failed agent runs comment on the issue |
+| **BYOK** | ⏳ Pending | Bring-your-own-key for LLM provider |
+
+## Gotchas
+
+- `tools` goes on `AssistantAgent`, **not** on `OpenAIChatCompletionClient`
+- Multi-task input: `task=[TextMessage(...)]`, not raw strings
+- GitHub private key in `.env`: single line with `\n` escapes
+- Docker image needs `apt-get install git` (not in `python:3.14-slim`)
+- `setup_git_auth` must set `user.name` and `user.email` before `git commit`
